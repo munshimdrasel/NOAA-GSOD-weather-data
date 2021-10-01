@@ -1,32 +1,55 @@
+#thid code's purpose is to download meteorological dataset from NOAA-GSOD website
+# website that I followed to build this codes
+# https://www.kaggle.com/johnjdavisiv/us-counties-weather-health-hospitals-covid19-data/report
+
+# prepared by: Munshi Md Rasel
+
+rm(list = ls())
+
 library(tidyverse)
 library(geosphere) #Needed for Haversine distance
 library(readxl)
 library(rgeos)
 library(zoo)
 library(sp)
-library(gsynth)
 library(fst)
 library(data.table)
-library(tidyverse)
 library(parallel)
 library(sf)
 library(viridis)
 library(ggplot2)
 library(stringi)
-library(panelView)
 library(lubridate)
 library(dslabs)
 library(stringi)
-library(openair)
 library(gridExtra)
 library(ggmap)
 library(Rmisc)
 library(usmap)
-library(ggpubr)
 
+
+
+
+
+# setwd("/projects/HAQ_LAB/mrasel/R/NOAA-GSOD-weather-data")
 setwd("/Volumes/GoogleDrive/My Drive/R/NOAA-GSOD-weather-data")
 
+#getting data set ready
+
+#I need this dataset to get STATE ID information
 fips_kevin_study <- read.fst("data/fips_kevin_study.fst")
+
+#Read directly from NOAA
+gsod_url <- "https://www.ncei.noaa.gov/data/global-summary-of-the-day/access/2020"
+
+#I went to the above address and then downloaded site information using "Download table as CSV" extension on chrome
+#manually deleted first couple of lines and got GSOD_directory2.txt file
+
+#this file containts stations information
+gsod_directory_file <- "data/GSOD_directory2.txt"
+
+
+
 
 #murders data from dslabs package has state name which I'll use to merge FIPS code from meteorology data
 
@@ -35,13 +58,16 @@ state.abb <- murders %>% dplyr::select (state, abb)
 state.abb <- dplyr::rename(state.abb, "STATE"= "abb")
 rm(murders)
 
+# ampd_raw <- as.data.table(read.fst ("/projects/HAQ_LAB/mrasel/R/ampd-raw-data-processing/data/ampd_monthly_all.fst"))
+
+#getting monthly AMPD dataset to get each facilities counties fips code
 ampd_raw <- as.data.table(read.fst ("/Volumes/GoogleDrive/My Drive/R/ampd-raw-data-processing/data/ampd_monthly_all.fst"))
 
 ampd_raw <- ampd_raw [, ID := paste(ORISPL_CODE, UNITID, sep = "-")]
 
-
 ampd_raw <- merge(ampd_raw, state.abb,  by=c("STATE"), all.x=T )
 
+#getting state name and state code
 fips_kevin_study2 <- fips_kevin_study %>% dplyr::rename(state= State.Name, FIPS.Code= County.Code) %>%
   dplyr::select(State.Code,  state)
 
@@ -51,34 +77,22 @@ fips_kevin_study2 <- unique(fips_kevin_study2, by = "state")
 ampd_raw <-  merge(ampd_raw, fips_kevin_study2, by=c("state" ), all.x=T)
 
 
+#creating county FIPS code with 5 digits (first 2 digit comes from state code and last 3 digit from County FIPS code)
 ampd_raw$FIPS.Code <- ampd_raw[ , stri_pad_left(ampd_raw$FIPS.Code, pad="0", width=3)]
 ampd_raw$State.Code <- ampd_raw[ , stri_pad_left(ampd_raw$State.Code, pad="0", width=2)]
 ampd_raw <-ampd_raw [, fips := paste(State.Code, FIPS.Code, sep = "")]
 
 
-# Restrict weather data so we only look at stations with recent data
-min_weather_end_date <- as.Date("2020-04-01")
-
-#For NYC munging
-nyc_boroughs_fips <- c("36081",
-                       "36085",
-                       "36061",
-                       "36047",
-                       "36005")
-#For KSC munging
-#Want Jackson, Clay, Platte, and Cass counties
-ksc_county_fips <- c("29037", "29047", 
-                     "29095", "29165")
-
-#Read directly from NOAA
-gsod_url <- "https://www.ncei.noaa.gov/data/global-summary-of-the-day/access/2020"
-
-gsod_directory_file <- "data/GSOD_directory.txt"
 gsod_filenames <- read.table(gsod_directory_file, header = FALSE,
                              stringsAsFactors = FALSE,
                              col.names = c("file","last_modified","time","size"))
 
+#somthing strange with date names
+gsod_filenames$last_modified <- as.POSIXct(gsod_filenames$last_modified, format = '%m/%d/%Y')
+gsod_filenames$last_modified <- as.Date(gsub('^0{2}', '20', gsod_filenames$last_modified))
+
 #These stations have lots of missing data or other issues, so ignore them.
+#Kaggle (will look into it)
 bad_stations <- c("72211800482", #Sarasota FL
                   "72334703809", #Dyer, TN
                   "99818099999", #Sanilac, MI
@@ -94,7 +108,7 @@ bad_stations <- c("72211800482", #Sarasota FL
 #Set up filenames for all stations
 gsod_filenames <- gsod_filenames %>%
   mutate(station_id = sub(".csv", "", file)) %>%
-  select(file, last_modified, station_id)
+  dplyr::select(file, last_modified, station_id)
 
 #Reading this fixed-width file is a mess
 noaa_col_names <- c("USAF",
@@ -109,7 +123,8 @@ noaa_col_names <- c("USAF",
                     "BEGIN",
                     "END")
 
-noaa_station_file <- "data/NOAA_GSOD_stations_clean.txt"
+#NOAA station informations all over the world
+noaa_station_file <- "data/NOAA_GSOD_stations_clean2.txt"
 
 
 #Get station locations
@@ -119,12 +134,26 @@ noaa_stations <- read_fwf(noaa_station_file,
                                         noaa_col_names),
                           skip = 1, col_types = "ccccccccccc")
 
+# USAF = Air Force station ID. May contain a letter in the first position.
+# WBAN = NCDC WBAN number
+# CTRY = FIPS country ID
+# ST = State for US stations
+# ICAO = ICAO ID
+# LAT = Latitude in thousandths of decimal degrees
+# LON = Longitude in thousandths of decimal degrees
+# ELEV = Elevation in meters
+# BEGIN = Beginning Period Of Record (YYYYMMDD). There may be reporting gaps within the P.O.R.
+# END = Ending Period Of Record (YYYYMMDD). There may be reporting gaps within the P.O.R.
+
+
 
 #Must filter by END > a few days ago
 #Also filter by BEGIN < Jan 1
 #Finally remove the bad stations
+# https://www.ncei.noaa.gov/pub/data/noaa/isd-history.txt
 
-min_weather_end_date <- as.Date("2020-04-01")
+# Restrict weather data so we only look at stations with recent data
+min_weather_end_date <- as.Date("2021-01-01")
 
 #Join location to file names 
 noaa_stations <- noaa_stations %>%
@@ -150,7 +179,7 @@ noaa_stations %>%
 # ampd_county <- ampd_daily_units_ec %>% dplyr::select ()
 
 
-ampd_raw <- ampd_raw %>% filter (!STATE %in% c("PR", "AK") )
+# ampd_raw <- ampd_raw %>% filter (!STATE %in% c("PR", "AK") )
 
 #removing facilities with no Facility locations
 ampd_raw <- subset(ampd_raw, !is.na(Facility.Latitude))
@@ -208,6 +237,7 @@ ampd_id_noaa <- ampd_unique_id %>%
             by = c("closest_station_usaf_wban" = "usaf_wban")) %>%
   select(-CTRY, -ST, -LAT, -LON, -BEGIN, -END)
 
+ampd_noaa_unique_fips <- unique(ampd_id_noaa, by ="fips")
 
 
 
@@ -216,16 +246,16 @@ ampd_id_noaa <- ampd_unique_id %>%
 
 # Pull CSVs directly from NOAA's server
 #  This takes between 12 and 60 minutes
-options(timeout = 400000)
+# options(timeout = 400000)
 
 #The ol' loop and bind_rows strategy
 all_county_weather <- list()
 
 #Probably a cleverer coder could vectorize or lapply this
-for (i in 1:nrow(ampd_id_noaa)){
+for (i in 1:nrow(ampd_noaa_unique_fips)){
   #print(i) #Tracks progress
   #For each county, get the daily weather data for 2020
-  this_county_fips <- ampd_id_noaa$fips[i]
+  this_county_fips <- ampd_noaa_unique_fips$fips[i]
   
   this_county_weather_file <- ampd_id_noaa$file[i]
   this_county_weather_url <- paste(gsod_url, this_county_weather_file, sep="/")
@@ -327,3 +357,8 @@ all_county_weather_df %>%
   geom_line(alpha = 0.04, color = "blue") + 
   ylab("Mean daily temperature (F)") + 
   theme(legend.position = "none")
+
+
+write.fst (all_county_weather_df,  "data/county_weather_2020.fst")
+
+read.fst("data/county_weather_2020.fst")
