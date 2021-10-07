@@ -1,3 +1,5 @@
+#script 1
+
 #thid code's purpose is to download meteorological dataset from NOAA-GSOD website
 # website that I followed to build this codes
 # https://www.kaggle.com/johnjdavisiv/us-counties-weather-health-hospitals-covid19-data/report
@@ -11,12 +13,8 @@ library(geosphere) #Needed for Haversine distance
 library(readxl)
 library(rgeos)
 library(zoo)
-library(sp)
 library(fst)
 library(data.table)
-library(parallel)
-library(sf)
-library(viridis)
 library(ggplot2)
 library(stringi)
 library(lubridate)
@@ -27,10 +25,6 @@ library(ggmap)
 library(Rmisc)
 library(usmap)
 
-
-
-
-
 # setwd("/projects/HAQ_LAB/mrasel/R/NOAA-GSOD-weather-data")
 setwd("/Volumes/GoogleDrive/My Drive/R/NOAA-GSOD-weather-data")
 
@@ -40,15 +34,17 @@ setwd("/Volumes/GoogleDrive/My Drive/R/NOAA-GSOD-weather-data")
 fips_kevin_study <- read.fst("data/fips_kevin_study.fst")
 
 #Read directly from NOAA
-gsod_url <- "https://www.ncei.noaa.gov/data/global-summary-of-the-day/access/2020"
+gsod_url <- "https://www.ncei.noaa.gov/data/global-summary-of-the-day/access/2000"
 
-#I went to the above address and then downloaded site information using "Download table as CSV" extension on chrome
-#manually deleted first couple of lines and got GSOD_directory2.txt file
+#I went to the above address and then downloaded site information using "Download table as CSV" extension on  google chrome
+#manually deleted first couple of lines and got GSOD_stations_20XX.txt file
 
-#this file containts stations information
-gsod_directory_file <- "data/GSOD_directory2.txt"
+#this file containts stations information for that specific year
+gsod_directory_file <- "data/GSOD_stations_2000.txt"
 
-
+# Restrict weather data so we only look at stations with recent data
+min_weather_begin_date <- as.Date("2000-01-01")
+min_weather_end_date <- as.Date("2001-01-01")
 
 
 #murders data from dslabs package has state name which I'll use to merge FIPS code from meteorology data
@@ -63,7 +59,7 @@ rm(murders)
 #getting monthly AMPD dataset to get each facilities counties fips code
 ampd_raw <- as.data.table(read.fst ("/Volumes/GoogleDrive/My Drive/R/ampd-raw-data-processing/data/ampd_monthly_all.fst"))
 
-ampd_raw <- ampd_raw [, ID := paste(ORISPL_CODE, UNITID, sep = "-")]
+# ampd_raw <- ampd_raw [, ID := paste(ORISPL_CODE, UNITID, sep = "-")]
 
 ampd_raw <- merge(ampd_raw, state.abb,  by=c("STATE"), all.x=T )
 
@@ -82,14 +78,23 @@ ampd_raw$FIPS.Code <- ampd_raw[ , stri_pad_left(ampd_raw$FIPS.Code, pad="0", wid
 ampd_raw$State.Code <- ampd_raw[ , stri_pad_left(ampd_raw$State.Code, pad="0", width=2)]
 ampd_raw <-ampd_raw [, fips := paste(State.Code, FIPS.Code, sep = "")]
 
+# Puerterico and DC state code added into the fips column
+ampd_raw$fips <- with(ampd_raw, ifelse(fips=="NA057", "72057",ifelse(fips=="NA001", "11001", fips)))
+
+#removing facilities with no Facility locations
+ampd_raw <- subset(ampd_raw, !is.na(Facility.Latitude))
+
+ampd_unique_id <- unique(ampd_raw, by= "ORISPL_CODE")
+
+
 
 gsod_filenames <- read.table(gsod_directory_file, header = FALSE,
                              stringsAsFactors = FALSE,
                              col.names = c("file","last_modified","time","size"))
 
-#somthing strange with date names
-gsod_filenames$last_modified <- as.POSIXct(gsod_filenames$last_modified, format = '%m/%d/%Y')
-gsod_filenames$last_modified <- as.Date(gsub('^0{2}', '20', gsod_filenames$last_modified))
+
+gsod_filenames$last_modified <- as.POSIXct(gsod_filenames$last_modified, format = '%m/%d/%y')
+# gsod_filenames$last_modified <- as.Date(gsub('^0{2}', '20', gsod_filenames$last_modified))
 
 #These stations have lots of missing data or other issues, so ignore them.
 #Kaggle (will look into it)
@@ -110,7 +115,7 @@ gsod_filenames <- gsod_filenames %>%
   mutate(station_id = sub(".csv", "", file)) %>%
   dplyr::select(file, last_modified, station_id)
 
-#Reading this fixed-width file is a mess
+#Reading fixed-width file 
 noaa_col_names <- c("USAF",
                     "WBAN",
                     "STATION_NAME",
@@ -123,8 +128,8 @@ noaa_col_names <- c("USAF",
                     "BEGIN",
                     "END")
 
-#NOAA station informations all over the world
-noaa_station_file <- "data/NOAA_GSOD_stations_clean2.txt"
+#NOAA station historical informations all over the world
+noaa_station_file <- "data/NOAA_GSOD_stations_updated.txt"
 
 
 #Get station locations
@@ -152,8 +157,8 @@ noaa_stations <- read_fwf(noaa_station_file,
 #Finally remove the bad stations
 # https://www.ncei.noaa.gov/pub/data/noaa/isd-history.txt
 
-# Restrict weather data so we only look at stations with recent data
-min_weather_end_date <- as.Date("2021-01-01")
+
+
 
 #Join location to file names 
 noaa_stations <- noaa_stations %>%
@@ -166,36 +171,32 @@ noaa_stations <- noaa_stations %>%
   inner_join(gsod_filenames,
              by = c("usaf_wban" = "station_id")) %>%
   filter(END >= min_weather_end_date) %>%
-  filter(BEGIN <= as.Date("2020-01-01")) %>%
+  filter(BEGIN <= min_weather_begin_date) %>%
   filter(!usaf_wban %in% bad_stations)
 
 #Plot station locations
-noaa_stations %>%
-  ggplot(aes(x=LON, y=LAT)) + 
-  geom_point(alpha=0.1) + 
-  coord_equal() + 
-  ggtitle("NOAA GSOD Weather Station Locations")
+# noaa_stations %>%
+#   ggplot(aes(x=LON, y=LAT)) + 
+#   geom_point(alpha=0.1) + 
+#   coord_equal() + 
+#   ggtitle("NOAA GSOD Weather Station Locations")
 
 # ampd_county <- ampd_daily_units_ec %>% dplyr::select ()
 
 
 # ampd_raw <- ampd_raw %>% filter (!STATE %in% c("PR", "AK") )
 
-#removing facilities with no Facility locations
-ampd_raw <- subset(ampd_raw, !is.na(Facility.Latitude))
 
 
-ampd_unique_id <- (unique(ampd_raw, by= "ORISPL_CODE"))
-
-#View counties
-ampd_unique_id %>%
-  ggplot(aes(x=Facility.Longitude, y=Facility.Latitude)) + 
-  geom_point(alpha=0.5, size=0.5, color = "black") + 
-  geom_point(data = noaa_stations, 
-             aes(x=LON,y=LAT), 
-             color = "red", alpha = 0.1) + 
-  coord_fixed(ratio = 1, xlim = c(-170,-60), ylim = c(25,70)) + #Sorry, Hawaii
-  ggtitle("US electric facility locations (black) and GSOD weather stations (red)") + theme_bw()
+#View facilities
+# ampd_unique_id %>%
+#   ggplot(aes(x=Facility.Longitude, y=Facility.Latitude)) + 
+#   geom_point(alpha=0.5, size=0.5, color = "black") + 
+#   geom_point(data = noaa_stations, 
+#              aes(x=LON,y=LAT), 
+#              color = "red", alpha = 0.1) + 
+#   coord_fixed(ratio = 1, xlim = c(-130,-60), ylim = c(25,55)) + #Sorry, Hawaii
+#   ggtitle("US electric facility locations (black) and GSOD weather stations (red)") + theme_bw()
 
 #Weather station distance matrix
 noaa_longlat <- cbind(noaa_stations$LON, noaa_stations$LAT)
@@ -224,12 +225,12 @@ for (i in 1:nrow(ampd_unique_id)) {
 ampd_unique_id <- ampd_unique_id %>%  dplyr::select(ORISPL_CODE, fips, closest_station_usaf_wban, km_to_closest_station, STATE)
 
 #Distribution of distances to closest station
-ampd_unique_id %>%
-  ggplot(aes(x=km_to_closest_station)) + 
-  geom_histogram(binwidth=5, color="black") +
-  labs(x= "Facility distance to closest NOAA GSOD location (km)", 
-       y = "Count",
-       title = "") 
+# ampd_unique_id %>%
+#   ggplot(aes(x=km_to_closest_station)) + 
+#   geom_histogram(binwidth=5, color="black") +
+#   labs(x= "Facility distance to closest NOAA GSOD location (km)", 
+#        y = "Count",
+#        title = "") 
 
 # Join county data with closest GSOD station
 ampd_id_noaa <- ampd_unique_id %>% 
@@ -239,27 +240,19 @@ ampd_id_noaa <- ampd_unique_id %>%
 
 ampd_noaa_unique_fips <- unique(ampd_id_noaa, by ="fips")
 
-
-
-
-# Download 2020 daily weather data
+# Download daily weather data
 
 # Pull CSVs directly from NOAA's server
-#  This takes between 12 and 60 minutes
-# options(timeout = 400000)
 
-#The ol' loop and bind_rows strategy
 all_county_weather <- list()
 
 #Probably a cleverer coder could vectorize or lapply this
 for (i in 1:nrow(ampd_noaa_unique_fips)){
   #print(i) #Tracks progress
-  #For each county, get the daily weather data for 2020
+  #For each county, get the daily weather data for that year
   this_county_fips <- ampd_noaa_unique_fips$fips[i]
-  
-  this_county_weather_file <- ampd_id_noaa$file[i]
+  this_county_weather_file <- ampd_noaa_unique_fips$file[i]
   this_county_weather_url <- paste(gsod_url, this_county_weather_file, sep="/")
-  
   this_county_weather <- read_csv(this_county_weather_url,
                                   col_types = cols(
                                     STATION = col_character(),
@@ -324,41 +317,25 @@ for (i in 1:nrow(ampd_noaa_unique_fips)){
   clean_weather_data[clean_weather_data == 999.9] <- NA
   clean_weather_data[clean_weather_data == 9999.9] <- NA
   
-  #Moving averages
-  clean_weather_data_with_avgs <- clean_weather_data %>%
-    mutate(mean_temp_3d_avg = rollmean(mean_temp, 3, na.pad = TRUE, align = "center")) %>%
-    mutate(mean_temp_5d_avg = rollmean(mean_temp, 5, na.pad = TRUE, align = "center")) %>%
-    mutate(mean_temp_10d_avg = rollmean(mean_temp, 10, na.pad = TRUE, align = "center")) %>%
-    mutate(mean_temp_15d_avg = rollmean(mean_temp, 15, na.pad = TRUE, align = "center")) %>%
-    mutate(max_temp_3d_avg = rollmean(max_temp, 3, na.pad = TRUE, align = "center")) %>%
-    mutate(max_temp_5d_avg = rollmean(max_temp, 5, na.pad = TRUE, align = "center")) %>%
-    mutate(max_temp_10d_avg = rollmean(max_temp, 10, na.pad = TRUE, align = "center")) %>%
-    mutate(max_temp_15d_avg = rollmean(max_temp, 15, na.pad = TRUE, align = "center")) %>% 
-    mutate(min_temp_3d_avg = rollmean(min_temp, 3, na.pad = TRUE, align = "center")) %>%
-    mutate(min_temp_5d_avg = rollmean(min_temp, 5, na.pad = TRUE, align = "center")) %>%
-    mutate(min_temp_10d_avg = rollmean(min_temp, 10, na.pad = TRUE, align = "center")) %>%
-    mutate(min_temp_15d_avg = rollmean(min_temp, 15, na.pad = TRUE, align = "center")) %>%
-    mutate(dewpoint_3d_avg = rollmean(dewpoint, 3, na.pad = TRUE, align = "center")) %>%
-    mutate(dewpoint_5d_avg = rollmean(dewpoint, 5, na.pad = TRUE, align = "center")) %>%
-    mutate(dewpoint_10d_avg = rollmean(dewpoint, 10, na.pad = TRUE, align = "center")) %>%
-    mutate(dewpoint_15d_avg = rollmean(dewpoint, 15, na.pad = TRUE, align = "center"))
-  
-  #Store in list
-  all_county_weather[[i]] <- clean_weather_data_with_avgs
+    #Store in list
+  all_county_weather[[i]] <- clean_weather_data
 }
 
 #Put it all together
 all_county_weather_df <- bind_rows(all_county_weather)
 
+#details of dataset can be found here
+# https://www.ncei.noaa.gov/data/global-summary-of-the-day/doc/readme.txt
+
 #Plot
-all_county_weather_df %>%
-  ggplot(aes(x=date, y=mean_temp_3d_avg, 
-             group = factor(station_id))) + 
-  geom_line(alpha = 0.04, color = "blue") + 
-  ylab("Mean daily temperature (F)") + 
-  theme(legend.position = "none")
+# all_county_weather_df %>%
+#   ggplot(aes(x=date, y=mean_temp_3d_avg, 
+#              group = factor(station_id))) + 
+#   geom_line(alpha = 0.04, color = "blue") + 
+#   ylab("Mean daily temperature (F)") + 
+#   theme(legend.position = "none")
 
 
-write.fst (all_county_weather_df,  "data/county_weather_2020.fst")
+write.fst (all_county_weather_df,  "data/county_weather_2000.fst")
 
-read.fst("data/county_weather_2020.fst")
+# read.fst("data/county_weather_1997.fst")
